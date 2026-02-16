@@ -127,7 +127,9 @@ mimi> memory_write "content"   # write to MEMORY.md
 mimi> heap_info                # how much RAM is free?
 mimi> session_list             # list all chat sessions
 mimi> session_clear 12345      # wipe a conversation
-mimi> restart                  # reboot
+mimi> heartbeat_trigger           # manually trigger a heartbeat check
+mimi> cron_start                  # start cron scheduler now
+mimi> restart                     # reboot
 ```
 
 ## Memory
@@ -139,6 +141,8 @@ MimiClaw stores everything as plain text files you can read and edit:
 | `SOUL.md` | The bot's personality — edit this to change how it behaves |
 | `USER.md` | Info about you — name, preferences, language |
 | `MEMORY.md` | Long-term memory — things the bot should always remember |
+| `HEARTBEAT.md` | Task list the bot checks periodically and acts on autonomously |
+| `cron.json` | Scheduled jobs — recurring or one-shot tasks created by the AI |
 | `2026-02-05.md` | Daily notes — what happened today |
 | `tg_12345.jsonl` | Chat history — your conversation with the bot |
 
@@ -150,8 +154,23 @@ MimiClaw supports tool calling for both Anthropic and OpenAI — the LLM can cal
 |------|-------------|
 | `web_search` | Search the web via Brave Search API for current information |
 | `get_current_time` | Fetch current date/time via HTTP and set the system clock |
+| `cron_add` | Schedule a recurring or one-shot task (the LLM creates cron jobs on its own) |
+| `cron_list` | List all scheduled cron jobs |
+| `cron_remove` | Remove a cron job by ID |
 
 To enable web search, set a [Brave Search API key](https://brave.com/search/api/) via `MIMI_SECRET_SEARCH_KEY` in `mimi_secrets.h`.
+
+## Cron Tasks
+
+MimiClaw has a built-in cron scheduler that lets the AI schedule its own tasks. The LLM can create recurring jobs ("every N seconds") or one-shot jobs ("at unix timestamp") via the `cron_add` tool. When a job fires, its message is injected into the agent loop — so the AI wakes up, processes the task, and responds.
+
+Jobs are persisted to SPIFFS (`cron.json`) and survive reboots. Example use cases: daily summaries, periodic reminders, scheduled check-ins.
+
+## Heartbeat
+
+The heartbeat service periodically reads `HEARTBEAT.md` from SPIFFS and checks for actionable tasks. If uncompleted items are found (anything that isn't an empty line, a header, or a checked `- [x]` box), it sends a prompt to the agent loop so the AI can act on them autonomously.
+
+This turns MimiClaw into a proactive assistant — write tasks to `HEARTBEAT.md` and the bot will pick them up on the next heartbeat cycle (default: every 30 minutes).
 
 ## Also Included
 
@@ -160,6 +179,8 @@ To enable web search, set a [Brave Search API key](https://brave.com/search/api/
 - **Dual-core** — network I/O and AI processing run on separate CPU cores
 - **HTTP proxy** — CONNECT tunnel support for restricted networks
 - **Multi-provider** — supports both Anthropic (Claude) and OpenAI (GPT), switchable at runtime
+- **Cron scheduler** — the AI can schedule its own recurring and one-shot tasks, persisted across reboots
+- **Heartbeat** — periodically checks a task file and prompts the AI to act autonomously
 - **Tool use** — ReAct agent loop with tool calling for both providers
 
 ## For Developers
