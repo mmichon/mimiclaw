@@ -58,6 +58,37 @@ cd mimiclaw
 # https://docs.espressif.com/projects/esp-idf/en/v5.5.2/esp32s3/get-started/
 ```
 
+##### Ubuntu Notes
+
+<details>
+<summary>Ubuntu dependency versions and build steps (collapsed by default)</summary>
+
+Recommended baseline:
+
+- Ubuntu 22.04/24.04
+- Python >= 3.10
+- CMake >= 3.16
+- Ninja >= 1.10
+- Git >= 2.34
+- flex >= 2.6
+- bison >= 3.8
+- gperf >= 3.1
+- dfu-util >= 0.11
+- `libusb-1.0-0`, `libffi-dev`, `libssl-dev`
+
+Install and build on Ubuntu:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git wget flex bison gperf python3 python3-pip python3-venv \
+  cmake ninja-build ccache libffi-dev libssl-dev dfu-util libusb-1.0-0
+
+./scripts/setup_idf_ubuntu.sh
+./scripts/build_ubuntu.sh
+```
+
+</details>
+
 ### Configure
 
 MimiClaw uses a **two-layer config** system: build-time defaults in `mimi_secrets.h`, with runtime overrides via the serial CLI. CLI values are stored in NVS flash and take priority over build-time values.
