@@ -83,6 +83,36 @@ sudo apt-get install -y git wget flex bison gperf python3 python3-pip python3-ve
 
 </details>
 
+<details>
+<summary>macOS インストール</summary>
+
+推奨ベースライン:
+
+- macOS 12/13/14
+- Xcode Command Line Tools
+- Homebrew
+- Python >= 3.10
+- CMake >= 3.16
+- Ninja >= 1.10
+- Git >= 2.34
+- flex >= 2.6
+- bison >= 3.8
+- gperf >= 3.1
+- dfu-util >= 0.11
+- `libusb`, `libffi`, `openssl`
+
+macOS でのインストールとビルド:
+
+```bash
+xcode-select --install
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+./scripts/setup_idf_macos.sh
+./scripts/build_macos.sh
+```
+
+</details>
+
 ### 設定
 
 MimiClawは**2層設定**を採用しています：`mimi_secrets.h`でビルド時のデフォルト値を設定し、シリアルCLIで実行時にオーバーライドできます。CLI設定値はNVS Flashに保存され、ビルド時の値より優先されます。
