@@ -31,7 +31,7 @@ static void imu_task(void *arg)
             int64_t now = esp_timer_get_time();
             if (now - s_last_shake_us > min_interval_us) {
                 s_last_shake_us = now;
-                ESP_LOGI(TAG, "Shake detected (delta=%.2f)", delta);
+                ESP_LOGD(TAG, "Shake detected (delta=%.2f)", delta);
                 if (s_shake_cb) {
                     s_shake_cb();
                 }

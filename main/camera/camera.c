@@ -7,6 +7,8 @@
 
 #include "esp_camera.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <string.h>
 
 static const char *TAG = "camera";
@@ -38,7 +40,7 @@ esp_err_t camera_init(void)
         .pin_href = CAM_PIN_HREF,
         .pin_pclk = CAM_PIN_PCLK,
 
-        .xclk_freq_hz = 20000000,
+        .xclk_freq_hz = 16000000,
         .ledc_timer = LEDC_TIMER_0,
         .ledc_channel = LEDC_CHANNEL_0,
 
@@ -50,9 +52,15 @@ esp_err_t camera_init(void)
         .grab_mode = CAMERA_GRAB_WHEN_EMPTY,
     };
 
-    esp_err_t err = esp_camera_init(&config);
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        err = esp_camera_init(&config);
+        if (err == ESP_OK) break;
+        ESP_LOGW(TAG, "Camera init attempt %d failed: %s", attempt, esp_err_to_name(err));
+        vTaskDelay(500 / portTICK_PERIOD_MS);
+    }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Camera init failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "Camera init failed after 3 attempts: %s", esp_err_to_name(err));
         return err;
     }
 
