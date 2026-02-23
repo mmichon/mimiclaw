@@ -21,6 +21,13 @@ esp_err_t telegram_bot_start(void);
 esp_err_t telegram_send_message(const char *chat_id, const char *text);
 
 /**
+ * Send a photo from SPIFFS to a Telegram chat.
+ * @param chat_id  Telegram chat ID (numeric string)
+ * @param path     Full path to JPEG file (e.g. /spiffs/photos/capture.jpg)
+ */
+esp_err_t telegram_send_photo(const char *chat_id, const char *path);
+
+/**
  * Save the Telegram bot token to NVS.
  */
 esp_err_t telegram_set_token(const char *token);

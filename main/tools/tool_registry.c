@@ -3,6 +3,8 @@
 #include "tools/tool_get_time.h"
 #include "tools/tool_files.h"
 #include "tools/tool_cron.h"
+#include "tools/tool_camera.h"
+#include "sdkconfig.h"
 
 #include <string.h>
 #include "esp_log.h"
@@ -174,6 +176,34 @@ esp_err_t tool_registry_init(void)
         .execute = tool_cron_remove_execute,
     };
     register_tool(&cr);
+
+#if CONFIG_IDF_TARGET_ESP32S3
+    /* Register take_photo (XIAO ESP32-S3 Sense camera) */
+    tool_camera_init();
+    mimi_tool_t tp = {
+        .name = "take_photo",
+        .description = "Capture a photo with the device camera. Saves to /spiffs/capture.jpg. Optionally send to Telegram by setting send_to_chat_id.",
+        .input_schema_json =
+            "{\"type\":\"object\","
+            "\"properties\":{\"send_to_chat_id\":{\"type\":\"string\",\"description\":\"Optional. If set, send the photo to this Telegram chat_id after capture\"}},"
+            "\"required\":[]}",
+        .execute = tool_take_photo_execute,
+    };
+    register_tool(&tp);
+
+    /* Register send_photo */
+    mimi_tool_t sp = {
+        .name = "send_photo",
+        .description = "Send a photo file from SPIFFS to a Telegram chat. Use path from take_photo (e.g. /spiffs/capture.jpg).",
+        .input_schema_json =
+            "{\"type\":\"object\","
+            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Path to JPEG file, e.g. /spiffs/capture.jpg\"},"
+            "\"chat_id\":{\"type\":\"string\",\"description\":\"Telegram chat ID to send to\"}},"
+            "\"required\":[\"path\",\"chat_id\"]}",
+        .execute = tool_send_photo_execute,
+    };
+    register_tool(&sp);
+#endif
 
     build_tools_json();
 

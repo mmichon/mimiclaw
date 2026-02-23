@@ -8,11 +8,13 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "cJSON.h"
+#include "mbedtls/base64.h"
 
 static const char *TAG = "agent";
 
@@ -79,6 +81,8 @@ static void append_turn_context_prompt(char *prompt, size_t size, const mimi_msg
         "- source_channel: %s\n"
         "- source_chat_id: %s\n"
         "- If using cron_add for Telegram in this turn, set channel='telegram' and chat_id to source_chat_id.\n"
+        "- For take_photo: use send_to_chat_id=source_chat_id to also send the photo to the user.\n"
+        "- For send_photo: use chat_id=source_chat_id. Path is typically /spiffs/capture.jpg from take_photo.\n"
         "- Never use chat_id 'cron' for Telegram messages.\n",
         msg->channel[0] ? msg->channel : "(unknown)",
         msg->chat_id[0] ? msg->chat_id : "(empty)");
@@ -90,9 +94,17 @@ static void append_turn_context_prompt(char *prompt, size_t size, const mimi_msg
 
 static char *patch_tool_input_with_context(const llm_tool_call_t *call, const mimi_msg_t *msg)
 {
-    if (!call || !msg || strcmp(call->name, "cron_add") != 0) {
-        return NULL;
+    if (!call || !msg) return NULL;
+
+    const char *patch_tools[] = { "cron_add", "take_photo", "send_photo", NULL };
+    bool need_patch = false;
+    for (int i = 0; patch_tools[i]; i++) {
+        if (strcmp(call->name, patch_tools[i]) == 0) {
+            need_patch = true;
+            break;
+        }
     }
+    if (!need_patch) return NULL;
 
     cJSON *root = cJSON_Parse(call->input ? call->input : "{}");
     if (!root || !cJSON_IsObject(root)) {
@@ -105,16 +117,41 @@ static char *patch_tool_input_with_context(const llm_tool_call_t *call, const mi
 
     bool changed = false;
 
-    cJSON *channel_item = cJSON_GetObjectItem(root, "channel");
-    const char *channel = cJSON_IsString(channel_item) ? channel_item->valuestring : NULL;
+    /* cron_add: patch channel and chat_id */
+    if (strcmp(call->name, "cron_add") == 0) {
+        cJSON *channel_item = cJSON_GetObjectItem(root, "channel");
+        const char *channel = cJSON_IsString(channel_item) ? channel_item->valuestring : NULL;
 
-    if ((!channel || channel[0] == '\0') && msg->channel[0] != '\0') {
-        json_set_string(root, "channel", msg->channel);
-        channel = msg->channel;
-        changed = true;
+        if ((!channel || channel[0] == '\0') && msg->channel[0] != '\0') {
+            json_set_string(root, "channel", msg->channel);
+            channel = msg->channel;
+            changed = true;
+        }
+
+        if (channel && strcmp(channel, MIMI_CHAN_TELEGRAM) == 0 &&
+            strcmp(msg->channel, MIMI_CHAN_TELEGRAM) == 0 && msg->chat_id[0] != '\0') {
+            cJSON *chat_item = cJSON_GetObjectItem(root, "chat_id");
+            const char *chat_id = cJSON_IsString(chat_item) ? chat_item->valuestring : NULL;
+            if (!chat_id || chat_id[0] == '\0' || strcmp(chat_id, "cron") == 0) {
+                json_set_string(root, "chat_id", msg->chat_id);
+                changed = true;
+            }
+        }
     }
 
-    if (channel && strcmp(channel, MIMI_CHAN_TELEGRAM) == 0 &&
+    /* take_photo: patch send_to_chat_id when in Telegram context */
+    if (strcmp(call->name, "take_photo") == 0 &&
+        strcmp(msg->channel, MIMI_CHAN_TELEGRAM) == 0 && msg->chat_id[0] != '\0') {
+        cJSON *send_item = cJSON_GetObjectItem(root, "send_to_chat_id");
+        const char *send_id = cJSON_IsString(send_item) ? send_item->valuestring : NULL;
+        if (!send_id || send_id[0] == '\0' || strcmp(send_id, "cron") == 0) {
+            json_set_string(root, "send_to_chat_id", msg->chat_id);
+            changed = true;
+        }
+    }
+
+    /* send_photo: patch chat_id when in Telegram context */
+    if (strcmp(call->name, "send_photo") == 0 &&
         strcmp(msg->channel, MIMI_CHAN_TELEGRAM) == 0 && msg->chat_id[0] != '\0') {
         cJSON *chat_item = cJSON_GetObjectItem(root, "chat_id");
         const char *chat_id = cJSON_IsString(chat_item) ? chat_item->valuestring : NULL;
@@ -128,7 +165,7 @@ static char *patch_tool_input_with_context(const llm_tool_call_t *call, const mi
     if (changed) {
         patched = cJSON_PrintUnformatted(root);
         if (patched) {
-            ESP_LOGI(TAG, "Patched cron_add target to %s:%s", msg->channel, msg->chat_id);
+            ESP_LOGI(TAG, "Patched %s target to %s:%s", call->name, msg->channel, msg->chat_id);
         }
     }
 
@@ -163,6 +200,51 @@ static cJSON *build_tool_results(const llm_response_t *resp, const mimi_msg_t *m
         cJSON_AddStringToObject(result_block, "tool_use_id", call->id);
         cJSON_AddStringToObject(result_block, "content", tool_output);
         cJSON_AddItemToArray(content, result_block);
+
+        /* For take_photo: inject the captured image so the LLM can actually see it */
+        if (strcmp(call->name, "take_photo") == 0) {
+            cJSON *res = cJSON_Parse(tool_output);
+            cJSON *path_item = res ? cJSON_GetObjectItem(res, "path") : NULL;
+            const char *img_path = (path_item && cJSON_IsString(path_item)) ? path_item->valuestring : NULL;
+            if (img_path && img_path[0]) {
+                FILE *f = fopen(img_path, "rb");
+                if (f) {
+                    fseek(f, 0, SEEK_END);
+                    long fsize = ftell(f);
+                    fseek(f, 0, SEEK_SET);
+                    if (fsize > 0 && fsize < 512 * 1024) {
+                        uint8_t *raw = heap_caps_malloc(fsize, MALLOC_CAP_SPIRAM);
+                        if (raw && (long)fread(raw, 1, fsize, f) == fsize) {
+                            size_t b64_max = ((fsize + 2) / 3) * 4 + 1;
+                            char *b64 = heap_caps_malloc(b64_max, MALLOC_CAP_SPIRAM);
+                            size_t b64_len = 0;
+                            if (b64 && mbedtls_base64_encode(
+                                    (unsigned char *)b64, b64_max, &b64_len,
+                                    raw, (size_t)fsize) == 0) {
+                                /* Build {"type":"image_url","image_url":{"url":"data:image/jpeg;base64,..."}} */
+                                size_t url_len = 23 + b64_len + 1;
+                                char *url = heap_caps_malloc(url_len, MALLOC_CAP_SPIRAM);
+                                if (url) {
+                                    snprintf(url, url_len, "data:image/jpeg;base64,%s", b64);
+                                    cJSON *img_block = cJSON_CreateObject();
+                                    cJSON_AddStringToObject(img_block, "type", "image_url");
+                                    cJSON *img_url_obj = cJSON_CreateObject();
+                                    cJSON_AddStringToObject(img_url_obj, "url", url);
+                                    cJSON_AddItemToObject(img_block, "image_url", img_url_obj);
+                                    cJSON_AddItemToArray(content, img_block);
+                                    ESP_LOGI(TAG, "Vision: added %d-byte JPEG to LLM context", (int)fsize);
+                                    heap_caps_free(url);
+                                }
+                            }
+                            heap_caps_free(b64);
+                        }
+                        heap_caps_free(raw);
+                    }
+                    fclose(f);
+                }
+            }
+            cJSON_Delete(res);
+        }
     }
 
     return content;

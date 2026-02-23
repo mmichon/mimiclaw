@@ -34,6 +34,9 @@
 #ifndef MIMI_SECRET_SEARCH_KEY
 #define MIMI_SECRET_SEARCH_KEY      ""
 #endif
+#ifndef MIMI_SECRET_ALLOWED_CHAT_ID
+#define MIMI_SECRET_ALLOWED_CHAT_ID ""
+#endif
 
 /* WiFi */
 #define MIMI_WIFI_MAX_RETRY          10
@@ -76,7 +79,7 @@
 #define MIMI_BUS_QUEUE_LEN           16
 #define MIMI_OUTBOUND_STACK          (12 * 1024)
 #define MIMI_OUTBOUND_PRIO           5
-#define MIMI_OUTBOUND_CORE           0
+#define MIMI_OUTBOUND_CORE           1   /* Core 1: avoid starving IDLE0 during TLS handshake */
 
 /* Memory / SPIFFS */
 #define MIMI_SPIFFS_BASE             "/spiffs"

@@ -26,6 +26,9 @@
 #include "buttons/button_driver.h"
 #include "imu/imu_manager.h"
 #include "skills/skill_loader.h"
+#if !CONFIG_IDF_TARGET_ESP32C3
+#include "camera/camera.h"
+#endif
 
 static const char *TAG = "mimi";
 
@@ -74,11 +77,22 @@ static void outbound_dispatch_task(void *arg)
         ESP_LOGI(TAG, "Dispatching response to %s:%s", msg.channel, msg.chat_id);
 
         if (strcmp(msg.channel, MIMI_CHAN_TELEGRAM) == 0) {
-            esp_err_t send_err = telegram_send_message(msg.chat_id, msg.content);
-            if (send_err != ESP_OK) {
-                ESP_LOGE(TAG, "Telegram send failed for %s: %s", msg.chat_id, esp_err_to_name(send_err));
+            esp_err_t send_err;
+            if (msg.content && strncmp(msg.content, "photo:", 6) == 0) {
+                const char *path = msg.content + 6;
+                send_err = telegram_send_photo(msg.chat_id, path);
+                if (send_err != ESP_OK) {
+                    ESP_LOGE(TAG, "Telegram photo send failed for %s: %s", msg.chat_id, esp_err_to_name(send_err));
+                } else {
+                    ESP_LOGI(TAG, "Telegram photo sent to %s", msg.chat_id);
+                }
             } else {
-                ESP_LOGI(TAG, "Telegram send success for %s (%d bytes)", msg.chat_id, (int)strlen(msg.content));
+                send_err = telegram_send_message(msg.chat_id, msg.content);
+                if (send_err != ESP_OK) {
+                    ESP_LOGE(TAG, "Telegram send failed for %s: %s", msg.chat_id, esp_err_to_name(send_err));
+                } else {
+                    ESP_LOGI(TAG, "Telegram send success for %s (%d bytes)", msg.chat_id, (int)strlen(msg.content));
+                }
             }
         } else if (strcmp(msg.channel, MIMI_CHAN_WEBSOCKET) == 0) {
             esp_err_t ws_err = ws_server_send(msg.chat_id, msg.content);
@@ -101,14 +115,20 @@ void app_main(void)
     esp_log_level_set("esp-x509-crt-bundle", ESP_LOG_WARN);
 
     ESP_LOGI(TAG, "========================================");
+#if CONFIG_IDF_TARGET_ESP32C3
+    ESP_LOGI(TAG, "  MimiClaw - ESP32-C3 AI Agent");
+#else
     ESP_LOGI(TAG, "  MimiClaw - ESP32-S3 AI Agent");
+#endif
     ESP_LOGI(TAG, "========================================");
 
     /* Print memory info */
     ESP_LOGI(TAG, "Internal free: %d bytes",
              (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+#if CONFIG_SPIRAM
     ESP_LOGI(TAG, "PSRAM free:    %d bytes",
              (int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+#endif
 
     /* Input */
     button_Init();
@@ -116,6 +136,13 @@ void app_main(void)
     imu_manager_set_shake_callback(NULL);
 
     /* Phase 1: Core infrastructure */
+#if !CONFIG_IDF_TARGET_ESP32C3
+    /* Init camera early before other subsystems fragment internal SRAM.
+     * The DMA ring buffer (16 KB) must be contiguous in internal SRAM. */
+    if (camera_init() != ESP_OK) {
+        ESP_LOGW(TAG, "Camera init failed at boot (no camera attached?)");
+    }
+#endif
     ESP_ERROR_CHECK(init_nvs());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     ESP_ERROR_CHECK(init_spiffs());

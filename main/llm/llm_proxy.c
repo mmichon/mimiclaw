@@ -208,7 +208,7 @@ static esp_err_t llm_http_direct(const char *post_data, resp_buf_t *rb, int *out
         .user_data = rb,
         .timeout_ms = 120 * 1000,
         .buffer_size = 4096,
-        .buffer_size_tx = 4096,
+        .buffer_size_tx = 8192,
         .crt_bundle_attach = esp_crt_bundle_attach,
     };
 
@@ -465,6 +465,20 @@ static cJSON *convert_messages_openai(const char *system_prompt, cJSON *messages
                             text_buf[off] = '\0';
                         }
                         has_user_text = true;
+                    }
+                } else if (btype && cJSON_IsString(btype) && strcmp(btype->valuestring, "image_url") == 0) {
+                    /* Vision image — emit as a standalone user message with image_url content */
+                    cJSON *img_url_item = cJSON_GetObjectItem(block, "image_url");
+                    if (img_url_item) {
+                        cJSON *vision_msg = cJSON_CreateObject();
+                        cJSON_AddStringToObject(vision_msg, "role", "user");
+                        cJSON *vision_content = cJSON_CreateArray();
+                        cJSON *vision_block = cJSON_CreateObject();
+                        cJSON_AddStringToObject(vision_block, "type", "image_url");
+                        cJSON_AddItemToObject(vision_block, "image_url", cJSON_Duplicate(img_url_item, 1));
+                        cJSON_AddItemToArray(vision_content, vision_block);
+                        cJSON_AddItemToObject(vision_msg, "content", vision_content);
+                        cJSON_AddItemToArray(out, vision_msg);
                     }
                 }
             }

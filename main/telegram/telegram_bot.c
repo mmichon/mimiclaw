@@ -6,10 +6,12 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
 #include "nvs.h"
 #include "cJSON.h"
 
@@ -129,23 +131,24 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 
 /* ── Proxy path: manual HTTP over CONNECT tunnel ────────────── */
 
-static char *tg_api_call_via_proxy(const char *path, const char *post_data)
+static char *tg_api_call_via_proxy_raw(const char *path, const void *post_body, size_t body_len,
+                                        const char *content_type)
 {
     proxy_conn_t *conn = proxy_conn_open("api.telegram.org", 443,
                                           (MIMI_TG_POLL_TIMEOUT_S + 5) * 1000);
     if (!conn) return NULL;
 
-    /* Build HTTP request */
     char header[512];
     int hlen;
-    if (post_data) {
+    if (post_body && body_len > 0) {
         hlen = snprintf(header, sizeof(header),
             "POST /bot%s/%s HTTP/1.1\r\n"
             "Host: api.telegram.org\r\n"
-            "Content-Type: application/json\r\n"
+            "Content-Type: %s\r\n"
             "Content-Length: %d\r\n"
             "Connection: close\r\n\r\n",
-            s_bot_token, path, (int)strlen(post_data));
+            s_bot_token, path, content_type ? content_type : "application/json",
+            (int)body_len);
     } else {
         hlen = snprintf(header, sizeof(header),
             "GET /bot%s/%s HTTP/1.1\r\n"
@@ -158,7 +161,7 @@ static char *tg_api_call_via_proxy(const char *path, const char *post_data)
         proxy_conn_close(conn);
         return NULL;
     }
-    if (post_data && proxy_conn_write(conn, post_data, strlen(post_data)) < 0) {
+    if (post_body && body_len > 0 && proxy_conn_write(conn, post_body, body_len) < 0) {
         proxy_conn_close(conn);
         return NULL;
     }
@@ -194,9 +197,16 @@ static char *tg_api_call_via_proxy(const char *path, const char *post_data)
     return result;
 }
 
+static char *tg_api_call_via_proxy(const char *path, const char *post_data)
+{
+    return tg_api_call_via_proxy_raw(path, post_data,
+        post_data ? strlen(post_data) : 0, "application/json");
+}
+
 /* ── Direct path: esp_http_client ───────────────────────────── */
 
-static char *tg_api_call_direct(const char *method, const char *post_data)
+static char *tg_api_call_direct_raw(const char *method, const void *body, size_t body_len,
+                                    const char *content_type)
 {
     char url[256];
     snprintf(url, sizeof(url), "https://api.telegram.org/bot%s/%s", s_bot_token, method);
@@ -224,10 +234,11 @@ static char *tg_api_call_direct(const char *method, const char *post_data)
         return NULL;
     }
 
-    if (post_data) {
+    if (body && body_len > 0) {
         esp_http_client_set_method(client, HTTP_METHOD_POST);
-        esp_http_client_set_header(client, "Content-Type", "application/json");
-        esp_http_client_set_post_field(client, post_data, strlen(post_data));
+        esp_http_client_set_header(client, "Content-Type",
+            content_type ? content_type : "application/json");
+        esp_http_client_set_post_field(client, body, body_len);
     }
 
     esp_err_t err = esp_http_client_perform(client);
@@ -242,12 +253,27 @@ static char *tg_api_call_direct(const char *method, const char *post_data)
     return resp.buf;
 }
 
+static char *tg_api_call_direct(const char *method, const char *post_data)
+{
+    return tg_api_call_direct_raw(method, post_data,
+        post_data ? strlen(post_data) : 0, "application/json");
+}
+
 static char *tg_api_call(const char *method, const char *post_data)
 {
     if (http_proxy_is_enabled()) {
         return tg_api_call_via_proxy(method, post_data);
     }
     return tg_api_call_direct(method, post_data);
+}
+
+static char *tg_api_call_with_body(const char *method, const void *body, size_t body_len,
+                                   const char *content_type)
+{
+    if (http_proxy_is_enabled()) {
+        return tg_api_call_via_proxy_raw(method, body, body_len, content_type);
+    }
+    return tg_api_call_direct_raw(method, body, body_len, content_type);
 }
 
 static bool tg_response_is_ok(const char *resp, const char **out_desc)
@@ -352,6 +378,15 @@ static void process_updates(const char *json_str)
             }
             seen_msg_insert(msg_key);
         }
+
+        /* Allow-list: if MIMI_SECRET_ALLOWED_CHAT_ID is set, only that chat can message */
+        if (MIMI_SECRET_ALLOWED_CHAT_ID[0] != '\0' &&
+            strcmp(chat_id_str, MIMI_SECRET_ALLOWED_CHAT_ID) != 0) {
+            ESP_LOGW(TAG, "Ignoring message from chat %s (not in allow list)", chat_id_str);
+            continue;
+        }
+
+        ESP_LOGI(TAG, "Message from chat %s: %.40s...", chat_id_str, text->valuestring);
 
         ESP_LOGI(TAG, "Message update_id=%" PRId64 " message_id=%d from chat %s: %.40s...",
                  uid, msg_id_val, chat_id_str, text->valuestring);
@@ -560,4 +595,85 @@ esp_err_t telegram_set_token(const char *token)
     strncpy(s_bot_token, token, sizeof(s_bot_token) - 1);
     ESP_LOGI(TAG, "Telegram bot token saved");
     return ESP_OK;
+}
+
+#define TG_PHOTO_BOUNDARY "MimiClawPhotoBoundary"
+#define TG_PHOTO_MAX_SIZE (256 * 1024)
+
+esp_err_t telegram_send_photo(const char *chat_id, const char *path)
+{
+    if (s_bot_token[0] == '\0') {
+        ESP_LOGW(TAG, "Cannot send photo: no bot token");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        ESP_LOGE(TAG, "Cannot open photo: %s", path);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (fsize <= 0 || fsize > (long)TG_PHOTO_MAX_SIZE) {
+        fclose(f);
+        ESP_LOGE(TAG, "Photo size invalid: %ld", (long)fsize);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    size_t file_len = (size_t)fsize;
+
+    /* Build multipart body. We need: boundary + chat_id part + photo part + end */
+    static const char part1[] =
+        "--" TG_PHOTO_BOUNDARY "\r\n"
+        "Content-Disposition: form-data; name=\"chat_id\"\r\n\r\n";
+    static const char part2[] =
+        "\r\n--" TG_PHOTO_BOUNDARY "\r\n"
+        "Content-Disposition: form-data; name=\"photo\"; filename=\"photo.jpg\"\r\n"
+        "Content-Type: image/jpeg\r\n\r\n";
+    static const char part3[] =
+        "\r\n--" TG_PHOTO_BOUNDARY "--\r\n";
+
+    size_t body_len = sizeof(part1) - 1 + strlen(chat_id)
+        + sizeof(part2) - 1 + file_len + sizeof(part3) - 1;
+
+    void *body = heap_caps_malloc(body_len, MALLOC_CAP_SPIRAM);
+    if (!body) {
+        body = malloc(body_len);
+    }
+    if (!body) {
+        fclose(f);
+        return ESP_ERR_NO_MEM;
+    }
+
+    char *p = (char *)body;
+    memcpy(p, part1, sizeof(part1) - 1);
+    p += sizeof(part1) - 1;
+    memcpy(p, chat_id, strlen(chat_id) + 1);
+    p += strlen(chat_id);
+    memcpy(p, part2, sizeof(part2) - 1);
+    p += sizeof(part2) - 1;
+    size_t read_len = fread(p, 1, file_len, f);
+    fclose(f);
+    if (read_len != file_len) {
+        free(body);
+        ESP_LOGE(TAG, "Photo read incomplete");
+        return ESP_FAIL;
+    }
+    p += file_len;
+    memcpy(p, part3, sizeof(part3) - 1);
+
+    char content_type[80];
+    snprintf(content_type, sizeof(content_type),
+             "multipart/form-data; boundary=" TG_PHOTO_BOUNDARY);
+
+    ESP_LOGI(TAG, "Sending photo to %s (%d bytes)", chat_id, (int)body_len);
+    char *resp = tg_api_call_with_body("sendPhoto", body, body_len, content_type);
+    free(body);
+
+    bool ok = resp && tg_response_is_ok(resp, NULL);
+    free(resp);
+
+    return ok ? ESP_OK : ESP_FAIL;
 }
