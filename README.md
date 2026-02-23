@@ -1,4 +1,6 @@
-# MimiClaw: Pocket AI Assistant on a $5 Chip
+# MimiClaw with Camera Support: Pocket AI Assistant on a $5 Chip
+
+<p>This fork enables camera support for the Seeed Sense (OV2640 and OV5640). You can do fun things like ask it to describe what it sees.
 
 <p align="center">
   <img src="assets/banner.png" alt="MimiClaw" width="500" />
